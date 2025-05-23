@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 import csv
 import dataclasses
@@ -6,39 +5,85 @@ import itertools
 import json
 import logging
 import os
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 from multiprocessing import JoinableQueue, Process, Queue
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-
-from piper_phonemize import (
-    phonemize_espeak,
-    phonemize_codepoints,
-    phoneme_ids_espeak,
-    phoneme_ids_codepoints,
-    get_codepoints_map,
-    get_espeak_map,
-    get_max_phonemes,
-    tashkeel_run,
-)
-
 from .norm_audio import cache_norm_audio, make_silence_detector
 
 _DIR = Path(__file__).parent
 _VERSION = (_DIR / "VERSION").read_text(encoding="utf-8").strip()
 _LOGGER = logging.getLogger("preprocess")
 
+_pad = 'pad'
+_start =    'start'
+_eos = 'eos'
+_punctuation = "!'(),.:;? "
+_special = '-'
+_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+_piyin_letters =  [chr(768), chr(769), chr(770), chr(772), chr(776),  chr(780)]
+_en_letters = 'ḁḇḉḏḛḟḡḣḭĵḳḻṁṅṓṗɋṙṡṫṵṽẉẋẏẓ'
+_en_phonemes = 'æðŋɐɑɔəɚɛɜɡɪɬɹɾʃʊʌʒʔˈˌː̩̃θᵻ'
+
+symbols = (
+    [_pad, _start, _eos] + list(_special) + list(_punctuation) + list(_letters) + list(_piyin_letters) + list(_en_letters) + list(_en_phonemes)
+)
+
+#symbols = 'θβːʝʔʒʏʎʌʊʃʁɾɹɲɪɣɡɜɛəɔɒɑɐœŋøðçæzyxwvutsrponmlkjihgfedcba_ZYXWVUSRMLKJIHGFEDCBA,  '
+symbol_to_id = {s: i for i, s in enumerate(symbols)}
 
 class PhonemeType(str, Enum):
-    ESPEAK = "espeak"
-    """Phonemes come from espeak-ng"""
+    T2P = 't2p'
 
-    TEXT = "text"
-    """Phonemes come from text itself"""
+def phoneme_to_ids(phoneme_text, missing_phonemes=None):
+    sequence = []
+    for character in phoneme_text:
+        if character in symbol_to_id:
+            sequence += [symbol_to_id[character]]
+        elif missing_phonemes is not None:
+            missing_phonemes.update(character)
+    return sequence
 
+def phonemize_batch_t2p(
+    args: argparse.Namespace, queue_in: JoinableQueue, queue_out: Queue
+):
+    try:
+        #casing = get_text_casing(args.text_casing)
+        silence_detector = make_silence_detector()
+
+        while True:
+            utt_batch = queue_in.get()
+            if utt_batch is None:
+                break
+
+            for utt in utt_batch:
+                try:
+                    _LOGGER.debug(utt)
+                    utt.phonemes = utt.text.strip()
+
+                    utt.phoneme_ids = phoneme_to_ids(
+                        utt.phonemes,
+                        missing_phonemes=utt.missing_phonemes,
+                    )
+                    if not args.skip_audio:
+                        utt.audio_norm_path, utt.audio_spec_path = cache_norm_audio(
+                            utt.audio_path,
+                            args.cache_dir,
+                            silence_detector,
+                            args.sample_rate,
+                        )
+                    queue_out.put(utt)
+                except TimeoutError:
+                    _LOGGER.error("Skipping utterance due to timeout: %s", utt)
+                except Exception:
+                    _LOGGER.exception("Failed to process utterance: %s", utt)
+                    queue_out.put(None)
+
+            queue_in.task_done()
+    except Exception:
+        _LOGGER.exception("phonemize_batch_t2p")
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -72,29 +117,14 @@ def main() -> None:
     parser.add_argument(
         "--phoneme-type",
         choices=list(PhonemeType),
-        default=PhonemeType.ESPEAK,
-        help="Type of phonemes to use (default: espeak)",
+        default=PhonemeType.T2P,
+        help="Type of phonemes to use (default: t2p)",
     )
     parser.add_argument(
         "--text-casing",
         choices=("ignore", "lower", "upper", "casefold"),
-        default="ignore",
-        help="Casing applied to utterance text",
-    )
-    #
-    parser.add_argument(
-        "--dataset-name",
-        help="Name of dataset to put in config (default: name of <ouput_dir>/../)",
-    )
-    parser.add_argument(
-        "--audio-quality",
-        help="Audio quality to put in config (default: name of <output_dir>)",
-    )
-    #
-    parser.add_argument(
-        "--tashkeel",
-        action="store_true",
-        help="Diacritize Arabic text with libtashkeel",
+        default="lower",
+        help="Casing applied to utterance text (default: lower)",
     )
     #
     parser.add_argument(
@@ -162,30 +192,20 @@ def main() -> None:
         _LOGGER.info("Single speaker dataset")
 
     # Write config
-    audio_quality = args.audio_quality or args.output_dir.name
-    dataset_name = args.dataset_name or args.output_dir.parent.name
-
     with open(args.output_dir / "config.json", "w", encoding="utf-8") as config_file:
         json.dump(
             {
-                "dataset": dataset_name,
                 "audio": {
                     "sample_rate": args.sample_rate,
-                    "quality": audio_quality,
                 },
                 "espeak": {
                     "voice": args.language,
                 },
-                "language": {
-                    "code": args.language,
-                },
                 "inference": {"noise_scale": 0.667, "length_scale": 1, "noise_w": 0.8},
                 "phoneme_type": args.phoneme_type.value,
                 "phoneme_map": {},
-                "phoneme_id_map": get_codepoints_map()[args.language]
-                if args.phoneme_type == PhonemeType.TEXT
-                else get_espeak_map(),
-                "num_symbols": get_max_phonemes(),
+                "phoneme_id_map": {k : [v] for k,v in symbol_to_id.items()},
+                "num_symbols": 256,
                 "num_speakers": len(speaker_counts),
                 "speaker_id_map": speaker_ids,
                 "piper_version": _VERSION,
@@ -202,17 +222,19 @@ def main() -> None:
     assert args.max_workers is not None
 
     batch_size = int(num_utterances / (args.max_workers * 2))
+
+    if (batch_size <= 0):
+        _LOGGER.info(
+            f"batch_size is reset to 1"
+        )
+        batch_size = 1;
+
     queue_in: "Queue[Iterable[Utterance]]" = JoinableQueue()
     queue_out: "Queue[Optional[Utterance]]" = Queue()
 
     # Start workers
-    if args.phoneme_type == PhonemeType.TEXT:
-        target = phonemize_batch_text
-    else:
-        target = phonemize_batch_espeak
-
     processes = [
-        Process(target=target, args=(args, queue_in, queue_out))
+        Process(target=phonemize_batch_t2p, args=(args, queue_in, queue_out))
         for _ in range(args.max_workers)
     ]
     for proc in processes:
@@ -279,105 +301,6 @@ def get_text_casing(casing: str):
         return str.casefold
 
     return lambda s: s
-
-
-def phonemize_batch_espeak(
-    args: argparse.Namespace, queue_in: JoinableQueue, queue_out: Queue
-):
-    try:
-        casing = get_text_casing(args.text_casing)
-        silence_detector = make_silence_detector()
-
-        while True:
-            utt_batch = queue_in.get()
-            if utt_batch is None:
-                break
-
-            for utt in utt_batch:
-                try:
-                    if args.tashkeel:
-                        utt.text = tashkeel_run(utt.text)
-
-                    _LOGGER.debug(utt)
-                    all_phonemes = phonemize_espeak(casing(utt.text), args.language)
-
-                    # Flatten
-                    utt.phonemes = [
-                        phoneme
-                        for sentence_phonemes in all_phonemes
-                        for phoneme in sentence_phonemes
-                    ]
-                    utt.phoneme_ids = phoneme_ids_espeak(
-                        utt.phonemes,
-                        missing_phonemes=utt.missing_phonemes,
-                    )
-                    if not args.skip_audio:
-                        utt.audio_norm_path, utt.audio_spec_path = cache_norm_audio(
-                            utt.audio_path,
-                            args.cache_dir,
-                            silence_detector,
-                            args.sample_rate,
-                        )
-                    queue_out.put(utt)
-                except TimeoutError:
-                    _LOGGER.error("Skipping utterance due to timeout: %s", utt)
-                except Exception:
-                    _LOGGER.exception("Failed to process utterance: %s", utt)
-                    queue_out.put(None)
-
-            queue_in.task_done()
-    except Exception:
-        _LOGGER.exception("phonemize_batch_espeak")
-
-
-def phonemize_batch_text(
-    args: argparse.Namespace, queue_in: JoinableQueue, queue_out: Queue
-):
-    try:
-        casing = get_text_casing(args.text_casing)
-        silence_detector = make_silence_detector()
-
-        while True:
-            utt_batch = queue_in.get()
-            if utt_batch is None:
-                break
-
-            for utt in utt_batch:
-                try:
-                    if args.tashkeel:
-                        utt.text = tashkeel_run(utt.text)
-
-                    _LOGGER.debug(utt)
-                    all_phonemes = phonemize_codepoints(casing(utt.text))
-                    # Flatten
-                    utt.phonemes = [
-                        phoneme
-                        for sentence_phonemes in all_phonemes
-                        for phoneme in sentence_phonemes
-                    ]
-                    utt.phoneme_ids = phoneme_ids_codepoints(
-                        args.language,
-                        utt.phonemes,
-                        missing_phonemes=utt.missing_phonemes,
-                    )
-                    if not args.skip_audio:
-                        utt.audio_norm_path, utt.audio_spec_path = cache_norm_audio(
-                            utt.audio_path,
-                            args.cache_dir,
-                            silence_detector,
-                            args.sample_rate,
-                        )
-                    queue_out.put(utt)
-                except TimeoutError:
-                    _LOGGER.error("Skipping utterance due to timeout: %s", utt)
-                except Exception:
-                    _LOGGER.exception("Failed to process utterance: %s", utt)
-                    queue_out.put(None)
-
-            queue_in.task_done()
-    except Exception:
-        _LOGGER.exception("phonemize_batch_text")
-
 
 # -----------------------------------------------------------------------------
 
