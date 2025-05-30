@@ -237,7 +237,11 @@ def main() -> None:
                 if utt.speaker is not None:
                     utt.speaker_id = speaker_ids[utt.speaker]
 
-                utt.phoneme_ids = [id + 160 * (utt.language_id if id not in [0,1,2,10] else 0) for id in utt.phoneme_ids]
+                if utt.language != 'cmn':
+                    utt.phoneme_ids = [id + 160 * (utt.language_id if id not in [0,1,2,3,8,10] else 0) for id in utt.phoneme_ids]
+                else:
+                    utt.phoneme_ids = [id + 160 * (utt.language_id if id not in [0,1,2,3,8] else 0) for id in utt.phoneme_ids]
+
                 utt_dict = dataclasses.asdict(utt)
                 utt_dict.pop("missing_phonemes")
 
