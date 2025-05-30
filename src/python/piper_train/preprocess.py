@@ -35,6 +35,7 @@ NUM_SYMBOLS = 512
 LANG_IDS = {
     'ms': 0,
     'en': 1,
+    'en-us':1,
     'cmn':2    
 }
 
@@ -437,7 +438,7 @@ def ljspeech_dataset(args: argparse.Namespace) -> Iterable[Utterance]:
                 filename, text = row[0], row[-1]
                 language = ""
             elif len(row) == 3:
-                filename, speaker, text = row[0], row[1], row[-2]
+                filename, speaker, text = row[0], row[1], row[-1]
                 language = ""
             else:
                 filename, speaker, language, text = row[0], row[1], row[2], row[-1]
