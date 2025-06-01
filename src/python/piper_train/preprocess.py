@@ -236,7 +236,7 @@ def main() -> None:
             utt = queue_out.get()
             if utt is not None:
                 if utt.speaker is not None:
-                    utt.speaker_id = speaker_ids[utt.speaker]
+                    utt.speaker_id = speaker_ids.get(utt.speaker)
 
                 if utt.language != 'cmn':
                     utt.phoneme_ids = [id + 160 * (utt.language_id if id not in [0,1,2,3,8,10] else 0) for id in utt.phoneme_ids]
