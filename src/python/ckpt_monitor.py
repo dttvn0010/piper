@@ -3,8 +3,9 @@
 
 import os
 import time
-
-ckpt_path = '/root/train/lightning_logs/version_0/checkpoints'
+import sys
+ckpt_path = sys.argv[1] #'/root/train/lightning_logs/version_0/checkpoints'
+output_path = sys.argv[2] 
 last_file = ''
 while True:
    if not os.path.exists(ckpt_path):
@@ -23,4 +24,4 @@ while True:
       continue
 
    time.sleep(10)
-   os.system(f'python3 -m piper_train.export_onnx {ckpt_path}/{last_file} /root/onnx/{last_file}.onnx')
+   os.system(f'python3 -m piper_train.export_onnx {ckpt_path}/{last_file} {output_path}/{last_file}.onnx')
