@@ -6,3 +6,4 @@ onnxruntime==1.14.0
 torchmetrics==0.11.4
 pytorch-lightning==1.9.0
 torch>=2
+tensorboard
